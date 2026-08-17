@@ -162,12 +162,13 @@ def detect_name_zone(image: Image.Image) -> tuple[int, int]:
     width, height = image.size
     rows = _analyze_rows(image)
     
-    header_end = int(height * 0.32)
-    text_blocks = _find_text_blocks(rows, int(height * 0.15), int(height * 0.40))
+    header_end = int(height * 0.30)
+    text_blocks = _find_text_blocks(rows, int(height * 0.12), int(height * 0.38))
     if text_blocks:
         header_end = max(block[1] for block in text_blocks[:3])
     
-    name_area_top = header_end + 10
+    min_name_y = int(height * 0.40)
+    name_area_top = max(header_end + 15, min_name_y)
     name_area_bottom = int(height * 0.58)
     
     underline_candidates = _find_horizontal_line_candidates(rows, name_area_top, name_area_bottom)
@@ -195,8 +196,8 @@ def detect_name_zone(image: Image.Image) -> tuple[int, int]:
     if zone_bottom - zone_top >= 20:
         return zone_top, zone_bottom
     
-    zone_top = int(height * 0.42)
-    zone_bottom = int(height * 0.52)
+    zone_top = int(height * 0.44)
+    zone_bottom = int(height * 0.54)
     return zone_top, zone_bottom
 
 
