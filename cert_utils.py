@@ -133,11 +133,11 @@ def _find_blank_band_by_scan(rows: list[dict], top_y: int, bottom_y: int) -> tup
     smoothed = _smooth(ink_values, radius=4)
     
     best_score = -999.0
-    best_start = top_y
+    best_start = 0
     window_size = 30
     
-    for start in range(top_y, bottom_y - window_size):
-        window = smoothed[start:top_y + window_size]
+    for start in range(0, len(smoothed) - window_size):
+        window = smoothed[start:start + window_size]
         avg_ink = sum(window) / len(window)
         max_val = max(window)
         score = -(avg_ink * 3000) - (max_val * 5000)
@@ -146,7 +146,7 @@ def _find_blank_band_by_scan(rows: list[dict], top_y: int, bottom_y: int) -> tup
             best_score = score
             best_start = start
     
-    return best_start, best_start + window_size
+    return top_y + best_start, top_y + best_start + window_size
 
 
 def detect_name_zone(image: Image.Image) -> tuple[int, int]:
