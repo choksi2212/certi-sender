@@ -1,0 +1,13 @@
+.cache/
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+sent.csv
+failed.csv
+Certi/
+*.png
+*.jpg
+*.jpeg
+.DS_Store
