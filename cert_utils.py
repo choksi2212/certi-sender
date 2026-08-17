@@ -1,9 +1,5 @@
 """
-Certificate generation with automatic name placement.
-
-Detects the name underline on the template (common on participation
-certificates) and centers the name above it. Falls back to a typical
-name band when no underline is found.
+Certificate generation with intelligent layout-aware name placement.
 """
 
 from __future__ import annotations
@@ -21,18 +17,13 @@ FONT_URL = (
 )
 
 MIN_FONT_SIZE = 14
-DEFAULT_FONT_SIZE = 70
-MAX_TEXT_WIDTH_RATIO = 0.82
-UNDERLINE_SCAN_START = 0.30
-UNDERLINE_SCAN_END = 0.72
-UNDERLINE_DARK_THRESHOLD = 110
-UNDERLINE_MIN_COVERAGE = 0.22
-GAP_ABOVE_LINE = 10
-FALLBACK_Y_RATIO = 0.46
+DEFAULT_FONT_SIZE = 68
+MAX_TEXT_WIDTH_RATIO = 0.78
+HORIZONTAL_MARGIN_RATIO = 0.14
+NAME_TEXT_COLOR = (25, 25, 30)
 
 
 def get_font_path() -> str:
-    """Download and cache a bold font for consistent rendering."""
     if FONT_CACHE.exists():
         return str(FONT_CACHE)
 
@@ -46,40 +37,206 @@ def load_template(template_bytes: bytes) -> Image.Image:
     return image.convert("RGB")
 
 
-def _row_dark_coverage(pixels, width: int, y: int, threshold: int) -> float:
-    dark = 0
-    for x in range(width):
-        r, g, b = pixels[x, y]
-        if r < threshold and g < threshold and b < threshold:
-            dark += 1
-    return dark / width
+def _is_dark(r: int, g: int, b: int) -> bool:
+    return r < 115 and g < 115 and b < 115
 
 
-def detect_name_line_y(image: Image.Image) -> int | None:
-    """
-    Find the horizontal underline where the participant name usually goes.
+def _is_gold(r: int, g: int, b: int) -> bool:
+    return r > 145 and g > 95 and b < 145 and (r - b) > 35
 
-    Certificates often have a decorative line under the blank name area.
-    We scan the middle band of the image and pick the strongest line.
-    """
+
+def _is_colored_ink(r: int, g: int, b: int) -> bool:
+    if _is_dark(r, g, b):
+        return True
+    max_c = max(r, g, b)
+    min_c = min(r, g, b)
+    return (max_c - min_c) > 38 and max_c > 80
+
+
+def _analyze_rows(image: Image.Image) -> list[dict]:
     width, height = image.size
     pixels = image.load()
+    x_start = int(width * HORIZONTAL_MARGIN_RATIO)
+    x_end = width - x_start
+    span = max(x_end - x_start, 1)
 
-    start_y = int(height * UNDERLINE_SCAN_START)
-    end_y = int(height * UNDERLINE_SCAN_END)
+    rows = []
+    for y in range(height):
+        dark = gold = ink = 0
+        for x in range(x_start, x_end):
+            r, g, b = pixels[x, y]
+            if _is_dark(r, g, b):
+                dark += 1
+            if _is_gold(r, g, b):
+                gold += 1
+            if _is_colored_ink(r, g, b):
+                ink += 1
 
-    best_y = None
-    best_score = 0.0
+        rows.append(
+            {
+                "y": y,
+                "dark": dark / span,
+                "gold": gold / span,
+                "ink": ink / span,
+            }
+        )
+    return rows
+
+
+def _smooth(values: list[float], radius: int = 2) -> list[float]:
+    if not values:
+        return values
+    smoothed = []
+    for index in range(len(values)):
+        start = max(0, index - radius)
+        end = min(len(values), index + radius + 1)
+        smoothed.append(sum(values[start:end]) / (end - start))
+    return smoothed
+
+
+def _find_text_blocks(rows: list[dict], start_y: int, end_y: int) -> list[tuple[int, int]]:
+    blocks = []
+    in_block = False
+    block_start = 0
+    threshold = 0.045
 
     for y in range(start_y, end_y):
-        coverage = _row_dark_coverage(
-            pixels, width, y, UNDERLINE_DARK_THRESHOLD
-        )
-        if coverage >= UNDERLINE_MIN_COVERAGE and coverage > best_score:
-            best_score = coverage
-            best_y = y
+        if rows[y]["ink"] >= threshold:
+            if not in_block:
+                block_start = y
+                in_block = True
+        elif in_block:
+            if y - block_start >= 4:
+                blocks.append((block_start, y - 1))
+            in_block = False
 
-    return best_y
+    if in_block and end_y - block_start >= 4:
+        blocks.append((block_start, end_y - 1))
+
+    return blocks
+
+
+def _find_decorative_lines(
+    rows: list[dict],
+    start_y: int,
+    end_y: int,
+    min_y: int,
+) -> list[tuple[int, float]]:
+    gold_values = _smooth([row["gold"] for row in rows])
+    candidates = []
+
+    y = start_y
+    while y < end_y:
+        if y < min_y:
+            y += 1
+            continue
+
+        if gold_values[y] < 0.018:
+            y += 1
+            continue
+
+        segment_start = y
+        peak = gold_values[y]
+        while y < end_y and gold_values[y] >= 0.012:
+            peak = max(peak, gold_values[y])
+            y += 1
+
+        segment_end = y - 1
+        if segment_end - segment_start <= 10:
+            center = (segment_start + segment_end) // 2
+            width_score = peak * 100
+            candidates.append((center, width_score))
+
+    return candidates
+
+
+def _find_blank_band(
+    rows: list[dict],
+    top_y: int,
+    bottom_y: int,
+) -> tuple[int, int] | None:
+    if bottom_y - top_y < 18:
+        return None
+
+    best_start = top_y
+    best_score = -1.0
+
+    for start in range(top_y, bottom_y - 12):
+        end = min(start + 40, bottom_y)
+        window = rows[start:end]
+        avg_ink = sum(row["ink"] for row in window) / len(window)
+        height = end - start
+        score = height - (avg_ink * 900)
+
+        if avg_ink < 0.02 and score > best_score:
+            best_score = score
+            best_start = start
+
+    band_height = bottom_y - best_start
+    if band_height < 12:
+        return None
+
+    return best_start, bottom_y
+
+
+def detect_name_zone(image: Image.Image) -> tuple[int, int]:
+    """
+    Locate the blank name band on a certificate template.
+
+    Uses full layout analysis:
+    1. Find static text blocks in the upper/middle area
+    2. Find decorative name underline below the header text
+    3. Pick the cleanest blank band between them
+    """
+    height = image.size[1]
+    rows = _analyze_rows(image)
+
+    upper_start = int(height * 0.24)
+    upper_end = int(height * 0.62)
+    text_blocks = _find_text_blocks(rows, upper_start, upper_end)
+
+    if text_blocks:
+        title_blocks = text_blocks[:3]
+        header_end = max(block[1] for block in title_blocks)
+    else:
+        header_end = int(height * 0.38)
+
+    line_search_start = header_end + 8
+    line_search_end = int(height * 0.56)
+    decorative_lines = _find_decorative_lines(
+        rows,
+        line_search_start,
+        line_search_end,
+        min_y=header_end + 10,
+    )
+
+    if decorative_lines:
+        decorative_lines.sort(key=lambda item: item[1], reverse=True)
+        line_y = decorative_lines[0][0]
+    else:
+        dark_values = _smooth([row["dark"] for row in rows])
+        line_y = None
+        for y in range(line_search_start, line_search_end):
+            if y < header_end + 14:
+                continue
+            if dark_values[y] > 0.12 and dark_values[y] > dark_values[y - 1]:
+                local = dark_values[max(0, y - 1): min(height, y + 2)]
+                if sum(local) / len(local) > 0.10:
+                    line_y = y
+                    break
+        if line_y is None:
+            line_y = int(height * 0.47)
+
+    zone_top = header_end + 10
+    zone_bottom = line_y - 8
+    blank_band = _find_blank_band(rows, zone_top, zone_bottom)
+
+    if blank_band:
+        return blank_band
+
+    fallback_top = header_end + 14
+    fallback_bottom = max(fallback_top + 28, line_y - 6)
+    return fallback_top, fallback_bottom
 
 
 def _fit_font(
@@ -87,6 +244,7 @@ def _fit_font(
     name: str,
     font_path: str,
     max_width: int,
+    max_height: int,
     start_size: int,
 ) -> tuple[ImageFont.FreeTypeFont, tuple[int, int, int, int]]:
     font_size = start_size
@@ -95,8 +253,9 @@ def _fit_font(
         font = ImageFont.truetype(font_path, font_size)
         bbox = draw.textbbox((0, 0), name, font=font)
         text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
 
-        if text_width <= max_width:
+        if text_width <= max_width and text_height <= max_height:
             return font, bbox
 
         font_size -= 1
@@ -112,32 +271,30 @@ def compute_name_position(
     font_path: str,
     font_size: int = DEFAULT_FONT_SIZE,
 ) -> tuple[int, int, ImageFont.FreeTypeFont]:
-    """
-    Compute x, y, and font so the name sits centered in the right spot.
-
-    Strategy:
-    1. Detect underline -> place text centered above it.
-    2. No underline -> place text in the usual certificate name band (~46%).
-    3. Shrink font until the name fits within 82% of image width.
-    """
     width, height = image.size
+    zone_top, zone_bottom = detect_name_zone(image)
+    zone_height = max(zone_bottom - zone_top, 20)
+
     max_text_width = int(width * MAX_TEXT_WIDTH_RATIO)
+    max_text_height = int(zone_height * 0.92)
 
     draw = ImageDraw.Draw(image)
-    font, bbox = _fit_font(draw, name, font_path, max_text_width, font_size)
+    font, bbox = _fit_font(
+        draw,
+        name,
+        font_path,
+        max_text_width,
+        max_text_height,
+        font_size,
+    )
 
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
 
     x = (width - text_width) // 2
+    y = zone_top + max((zone_height - text_height) // 2, 0)
+    y = max(zone_top, min(y, zone_bottom - text_height))
 
-    underline_y = detect_name_line_y(image)
-    if underline_y is not None:
-        y = underline_y - text_height - GAP_ABOVE_LINE
-    else:
-        y = int(height * FALLBACK_Y_RATIO) - text_height // 2
-
-    y = max(0, min(y, height - text_height))
     return x, y, font
 
 
@@ -147,7 +304,6 @@ def generate_certificate(
     font_path: str | None = None,
     font_size: int = DEFAULT_FONT_SIZE,
 ) -> bytes:
-    """Return PNG bytes for one personalized certificate."""
     if not name.strip():
         raise ValueError("Name cannot be empty.")
 
@@ -156,39 +312,25 @@ def generate_certificate(
     draw = ImageDraw.Draw(image)
 
     x, y, font = compute_name_position(image, name, font_path, font_size)
-    draw.text((x, y), name, font=font, fill=(0, 0, 0))
+    draw.text((x, y), name, font=font, fill=NAME_TEXT_COLOR)
 
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
-def preview_placement(
+def preview_certificate(
     template_bytes: bytes,
     sample_name: str,
     font_path: str | None = None,
-) -> tuple[bytes, dict]:
-    """
-    Generate a preview and return placement metadata for the UI.
-    """
+) -> bytes:
     font_path = font_path or get_font_path()
     image = load_template(template_bytes)
-    underline_y = detect_name_line_y(image)
-    x, y, font = compute_name_position(image, sample_name, font_path)
-
     draw = ImageDraw.Draw(image)
-    draw.text((x, y), sample_name, font=font, fill=(0, 0, 0))
+
+    x, y, font = compute_name_position(image, sample_name, font_path)
+    draw.text((x, y), sample_name, font=font, fill=NAME_TEXT_COLOR)
 
     buffer = BytesIO()
     image.save(buffer, format="PNG")
-
-    bbox = draw.textbbox((x, y), sample_name, font=font)
-    info = {
-        "x": x,
-        "y": y,
-        "font_size": font.size,
-        "underline_detected": underline_y is not None,
-        "underline_y": underline_y,
-        "text_box": bbox,
-    }
-    return buffer.getvalue(), info
+    return buffer.getvalue()

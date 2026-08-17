@@ -1,52 +1,47 @@
 import csv
-from io import BytesIO, StringIO
+from io import StringIO
 
 import streamlit as st
 
-from cert_utils import generate_certificate, get_font_path, preview_placement
+from cert_utils import generate_certificate, get_font_path, preview_certificate
 from email_utils import DEFAULT_BODY, DEFAULT_SUBJECT, parse_participants, send_certificates
+from ui.styles import PREMIUM_CSS, render_hero, section_card
 
 
 st.set_page_config(
-    page_title="Certificate Mailer",
-    page_icon="📧",
-    layout="centered",
+    page_title="Certi Sender",
+    page_icon="✦",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-st.title("Certificate Mailer")
-st.caption("Upload a template, upload a CSV, and send certificates automatically.")
+st.markdown(PREMIUM_CSS, unsafe_allow_html=True)
+render_hero()
 
-with st.expander("How automatic name placement works"):
-    st.markdown(
-        """
-        **You no longer need manual X/Y offsets.**
+participants = []
+csv_errors = []
 
-        1. The app scans your certificate template for a **horizontal underline**
-           in the middle area (where names are usually written).
-        2. If found, your participant name is **centered above that line**.
-        3. If no line is found, the name is placed in a **default name band**
-           (~46% from the top), which matches most certificate layouts.
-        4. Long names automatically **shrink the font** until they fit within
-           ~82% of the certificate width.
+section_card(
+    "Step 01",
+    "Upload your files",
+    "Add your certificate template and the participant list to get started.",
+    "delay-1",
+)
 
-        Use **Preview placement** below to verify before sending.
-        """
-    )
+upload_col1, upload_col2 = st.columns(2, gap="large")
 
-st.subheader("1. Upload files")
-
-col1, col2 = st.columns(2)
-
-with col1:
+with upload_col1:
     template_file = st.file_uploader(
-        "Certificate template (PNG/JPG)",
+        "Certificate template",
         type=["png", "jpg", "jpeg"],
+        help="PNG or JPG template without participant names filled in.",
     )
 
-with col2:
+with upload_col2:
     csv_file = st.file_uploader(
-        "Participants CSV (Name + Email)",
+        "Participants CSV",
         type=["csv"],
+        help="CSV must include participant names and email addresses.",
     )
 
 if csv_file:
@@ -60,59 +55,68 @@ if csv_file:
         for error in csv_errors:
             st.error(error)
     else:
-        st.success(f"Found **{len(participants)}** participants with valid emails.")
+        st.markdown(
+            f'<div class="stat-pill">✓ {len(participants)} participants ready to receive certificates</div>',
+            unsafe_allow_html=True,
+        )
 
-st.subheader("2. Email settings")
-
-sender_email = st.text_input("Your Gmail address")
-app_password = st.text_input("Gmail App Password", type="password")
-
-subject = st.text_input("Email subject", value=DEFAULT_SUBJECT)
-body_template = st.text_area(
-    "Email message (use `{name}` for participant name)",
-    value=DEFAULT_BODY,
-    height=160,
+section_card(
+    "Step 02",
+    "Delivery settings",
+    "Connect your Gmail account and customize the message your recipients will receive.",
+    "delay-2",
 )
 
-delay_seconds = st.slider("Delay between emails (seconds)", 2, 10, 4)
+settings_col1, settings_col2 = st.columns(2, gap="large")
 
-st.subheader("3. Preview placement")
+with settings_col1:
+    sender_email = st.text_input("Sender Gmail address")
+    app_password = st.text_input("Gmail App Password", type="password")
+    subject = st.text_input("Email subject", value=DEFAULT_SUBJECT)
 
-preview_name = st.text_input(
-    "Sample name for preview",
-    value="Alex Johnson",
+with settings_col2:
+    body_template = st.text_area(
+        "Email message",
+        value=DEFAULT_BODY,
+        height=180,
+        help="Use {name} to personalize each email.",
+    )
+    delay_seconds = st.slider("Delay between emails (seconds)", 2, 10, 4)
+
+section_card(
+    "Step 03",
+    "Preview",
+    "Check how one certificate looks before sending the full batch.",
+    "delay-3",
 )
 
-if st.button("Preview placement", use_container_width=True):
-    if not template_file:
-        st.warning("Upload a certificate template first.")
-    else:
-        try:
-            preview_png, info = preview_placement(
-                template_file.getvalue(),
-                preview_name,
-            )
-            st.image(preview_png, caption=f"Preview for: {preview_name}")
+preview_col1, preview_col2 = st.columns([1, 1.2], gap="large")
 
-            if info["underline_detected"]:
-                st.info(
-                    "Underline detected automatically. "
-                    f"Name placed above line at y={info['underline_y']}."
+with preview_col1:
+    preview_name = st.text_input("Sample participant name", value="Alex Johnson")
+    preview_clicked = st.button("Generate preview", use_container_width=True)
+
+with preview_col2:
+    if preview_clicked:
+        if not template_file:
+            st.warning("Upload a certificate template first.")
+        else:
+            try:
+                preview_png = preview_certificate(
+                    template_file.getvalue(),
+                    preview_name,
                 )
-            else:
-                st.info(
-                    "No underline detected. "
-                    "Used default name band placement instead."
-                )
+                st.image(preview_png, use_container_width=True)
+                st.caption(f"Preview for {preview_name}")
+            except Exception as error:
+                st.error(f"Preview failed: {error}")
 
-            st.caption(
-                f"Position: x={info['x']}, y={info['y']}, "
-                f"font size={info['font_size']}"
-            )
-        except Exception as error:
-            st.error(f"Preview failed: {error}")
-
-st.subheader("4. Send certificates")
+section_card(
+    "Step 04",
+    "Send certificates",
+    "Launch delivery when everything looks perfect.",
+    "delay-4",
+)
 
 if st.button("Send all certificates", type="primary", use_container_width=True):
     if not template_file:
@@ -143,8 +147,8 @@ if st.button("Send all certificates", type="primary", use_container_width=True):
 
     def update_progress(current, total, row):
         progress_bar.progress(current / total)
-        status_box.write(
-            f"Processing {current}/{total}: **{row['name']}** → {row['status']}"
+        status_box.markdown(
+            f"**Sending {current}/{total}** · {row['name']} · `{row['status']}`"
         )
 
     try:
@@ -170,10 +174,10 @@ if st.button("Send all certificates", type="primary", use_container_width=True):
     sent = [row for row in results if row["status"] == "sent"]
     failed = [row for row in results if row["status"] != "sent"]
 
-    st.success(f"Done. Sent: {len(sent)} | Failed: {len(failed)}")
+    st.success(f"Delivery complete · Sent: {len(sent)} · Failed: {len(failed)}")
 
     if failed:
-        st.error("Some emails failed:")
+        st.error("Some emails could not be delivered:")
         for row in failed:
             st.write(f"- {row['name']} ({row['email']}): {row['error']}")
 
@@ -187,16 +191,19 @@ if st.button("Send all certificates", type="primary", use_container_width=True):
         writer.writerows(results)
 
         st.download_button(
-            "Download report CSV",
+            "Download delivery report",
             data=report_buffer.getvalue(),
             file_name="certificate_send_report.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
-st.divider()
-st.caption(
-    "Tip: create a Gmail App Password at "
-    "https://myaccount.google.com/apppasswords "
-    "(2-Step Verification must be enabled)."
+st.markdown(
+    """
+    <div class="footer-note">
+        Use a Gmail App Password for secure delivery.
+        Credentials are never stored and only used during your active session.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
