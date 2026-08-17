@@ -152,23 +152,16 @@ def _find_blank_band_by_scan(rows: list[dict], top_y: int, bottom_y: int) -> tup
 def detect_name_zone(image: Image.Image) -> tuple[int, int]:
     """
     Detect the best zone for placing participant name.
-    
-    Algorithm:
-    1. Find the header area (title text)
-    2. Search for underlines/decoration BELOW the header
-    3. The name zone is the blank area ABOVE the underline
-    4. Fall back to proportional positioning if no underline found
     """
     width, height = image.size
     rows = _analyze_rows(image)
     
     header_end = int(height * 0.30)
-    text_blocks = _find_text_blocks(rows, int(height * 0.12), int(height * 0.38))
+    text_blocks = _find_text_blocks(rows, int(height * 0.10), int(height * 0.36))
     if text_blocks:
         header_end = max(block[1] for block in text_blocks[:3])
     
-    min_name_y = int(height * 0.40)
-    name_area_top = max(header_end + 15, min_name_y)
+    name_area_top = max(header_end + 20, int(height * 0.44))
     name_area_bottom = int(height * 0.58)
     
     underline_candidates = _find_horizontal_line_candidates(rows, name_area_top, name_area_bottom)
@@ -181,22 +174,14 @@ def detect_name_zone(image: Image.Image) -> tuple[int, int]:
         zone_bottom = line_y - 4
         
         if zone_bottom - zone_top >= 20:
-            found_top, found_bottom = _find_blank_band_by_scan(rows, zone_top, zone_bottom)
-            if found_bottom - found_top >= 15:
-                return found_top, found_bottom
+            return zone_top, zone_bottom
         
-        zone_height = zone_bottom - zone_top
-        if zone_height < 20:
-            zone_top = line_y - 35
-            zone_bottom = line_y - 4
+        if zone_bottom - zone_top < 15:
+            zone_bottom = zone_top + 35
         
         return zone_top, zone_bottom
     
-    zone_top, zone_bottom = _find_blank_band_by_scan(rows, name_area_top, name_area_bottom)
-    if zone_bottom - zone_top >= 20:
-        return zone_top, zone_bottom
-    
-    zone_top = int(height * 0.44)
+    zone_top = int(height * 0.46)
     zone_bottom = int(height * 0.54)
     return zone_top, zone_bottom
 
