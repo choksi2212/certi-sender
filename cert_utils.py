@@ -36,31 +36,43 @@ def load_template(template_bytes: bytes) -> Image.Image:
     return image.convert("RGB")
 
 
-def _analyze_rows(image: Image.Image) -> list[dict]:
-    width, height = image.size
-    pixels = image.load()
-    margin = int(width * 0.08)
-    span = max(width - 2 * margin, 1)
-
-    rows = []
-    for y in range(height):
-        ink = 0
-        for x in range(margin, width - margin):
-            r, g, b = pixels[x, y]
-            if _is_colored_ink(r, g, b):
-                ink += 1
-        rows.append({
-            "y": y,
-            "ink": ink / span,
-        })
-    return rows
-
-
 def _is_colored_ink(r: int, g: int, b: int) -> bool:
     max_c = max(r, g, b)
     min_c = min(r, g, b)
     saturation = max_c - min_c
-    return saturation > 30 and max_c > 60
+    return saturation > 25 and max_c > 50
+
+
+def _analyze_image(image: Image.Image) -> dict:
+    width, height = image.size
+    pixels = image.load()
+    margin = int(width * 0.06)
+    center_x = width // 2
+    center_strip_width = int(width * 0.25)
+    
+    col_ink = [0] * width
+    row_ink = [0] * height
+    center_ink = [0] * height
+    
+    for y in range(height):
+        for x in range(margin, width - margin):
+            r, g, b = pixels[x, y]
+            if _is_colored_ink(r, g, b):
+                row_ink[y] += 1
+                if abs(x - center_x) < center_strip_width:
+                    center_ink[y] += 1
+    
+    span = max(width - 2 * margin, 1)
+    for y in range(height):
+        row_ink[y] /= span
+        center_ink[y] /= (2 * center_strip_width)
+    
+    return {
+        "row_ink": row_ink,
+        "center_ink": center_ink,
+        "width": width,
+        "height": height,
+    }
 
 
 def _smooth(values: list[float], radius: int = 3) -> list[float]:
@@ -74,112 +86,142 @@ def _smooth(values: list[float], radius: int = 3) -> list[float]:
     return smoothed
 
 
-def _find_text_blocks(rows: list[dict], start_y: int, end_y: int) -> list[tuple[int, int]]:
-    blocks = []
+def _find_header_blocks(analysis: dict) -> int:
+    row_ink = analysis["row_ink"]
+    height = analysis["height"]
+    
+    header_end = int(height * 0.32)
     in_block = False
     block_start = 0
-    threshold = 0.03
-
-    for y in range(start_y, end_y):
-        if rows[y]["ink"] >= threshold:
+    
+    for y in range(int(height * 0.10), int(height * 0.38)):
+        if row_ink[y] > 0.025:
             if not in_block:
-                block_start = y
                 in_block = True
+                block_start = y
         elif in_block:
-            if y - block_start >= 5:
-                blocks.append((block_start, y - 1))
+            if y - block_start >= 8:
+                header_end = y
             in_block = False
-
-    if in_block and end_y - block_start >= 5:
-        blocks.append((block_start, end_y - 1))
-
-    return blocks
-
-
-def _find_horizontal_line_candidates(rows: list[dict], start_y: int, end_y: int) -> list[dict]:
-    smoothed = _smooth([r["ink"] for r in rows], radius=2)
     
-    candidates = []
-    for y in range(start_y, min(end_y, len(rows) - 1)):
-        current = smoothed[y]
-        next_row = smoothed[y + 1] if y + 1 < len(rows) else 0
+    return header_end
+
+
+def _find_name_underline(row_ink: list[float], header_end: int, height: int) -> tuple[int, float] | None:
+    smoothed = _smooth(row_ink, radius=3)
+    
+    search_start = max(header_end + 20, int(height * 0.40))
+    search_end = min(int(height * 0.60), len(smoothed) - 1)
+    
+    best_line_y = None
+    best_line_score = 0
+    in_candidate = False
+    candidate_start = 0
+    candidate_pixels = []
+    
+    for y in range(search_start, search_end):
+        val = smoothed[y]
         
-        if current > 0.015 and next_row > 0.015:
-            width = 1
-            while y + width < len(rows) and smoothed[y + width] > 0.010:
-                width += 1
-                if width > 12:
-                    break
+        if val > 0.015:
+            if not in_candidate:
+                in_candidate = True
+                candidate_start = y
+                candidate_pixels = []
+            candidate_pixels.append(y)
+        else:
+            if in_candidate and len(candidate_pixels) >= 3:
+                candidate_end = candidate_pixels[-1]
+                width = candidate_end - candidate_start + 1
+                
+                if width <= 15:
+                    avg_strength = sum(smoothed[p] for p in candidate_pixels) / len(candidate_pixels)
+                    score = avg_strength * 100
+                    
+                    if score > best_line_score:
+                        best_line_score = score
+                        best_line_y = (candidate_start + candidate_end) // 2
             
-            if 2 <= width <= 12:
-                center_y = y + width // 2
-                candidates.append({
-                    "start": y,
-                    "end": y + width - 1,
-                    "center": center_y,
-                    "width": width,
-                    "strength": current,
-                })
+            in_candidate = False
+            candidate_pixels = []
     
-    candidates.sort(key=lambda x: x["strength"], reverse=True)
-    return candidates
+    if in_candidate and len(candidate_pixels) >= 3:
+        candidate_end = candidate_pixels[-1]
+        width = candidate_end - candidate_start + 1
+        if width <= 15:
+            avg_strength = sum(smoothed[p] for p in candidate_pixels) / len(candidate_pixels)
+            score = avg_strength * 100
+            if score > best_line_score:
+                best_line_y = (candidate_start + candidate_end) // 2
+    
+    if best_line_y is not None:
+        return best_line_y, best_line_score
+    return None
 
 
-def _find_blank_band_by_scan(rows: list[dict], top_y: int, bottom_y: int) -> tuple[int, int]:
-    if bottom_y - top_y < 15:
-        return top_y, top_y + 30
+def _find_blank_rectangle(center_ink: list[float], header_end: int, height: int) -> tuple[int, int] | None:
+    smoothed = _smooth(center_ink, radius=4)
     
-    ink_values = [rows[y]["ink"] for y in range(top_y, bottom_y)]
-    smoothed = _smooth(ink_values, radius=4)
+    search_start = max(header_end + 25, int(height * 0.42))
+    search_end = int(height * 0.58)
     
-    best_score = -999.0
-    best_start = 0
-    window_size = 30
+    best_start = search_start
+    best_blank_score = -999.0
+    window_size = 35
     
-    for start in range(0, len(smoothed) - window_size):
+    for start in range(search_start, search_end - window_size):
         window = smoothed[start:start + window_size]
-        avg_ink = sum(window) / len(window)
+        avg = sum(window) / len(window)
         max_val = max(window)
-        score = -(avg_ink * 3000) - (max_val * 5000)
         
-        if score > best_score:
-            best_score = score
+        if max_val > 0.03:
+            continue
+        
+        score = -avg * 2000
+        if score > best_blank_score:
+            best_blank_score = score
             best_start = start
     
-    return top_y + best_start, top_y + best_start + window_size
+    if best_blank_score > -500:
+        return None
+    
+    return best_start, best_start + window_size
 
 
 def detect_name_zone(image: Image.Image) -> tuple[int, int]:
     """
-    Detect the best zone for placing participant name.
+    Automatically detect the best name placement zone.
+    
+    Strategy:
+    1. Find where header content ends
+    2. Look for a horizontal line/underline in the name area (40-60%)
+    3. Name should go ABOVE the line
+    4. If no clear line, find the blankest rectangle in center band
     """
-    width, height = image.size
-    rows = _analyze_rows(image)
+    analysis = _analyze_image(image)
+    row_ink = analysis["row_ink"]
+    center_ink = analysis["center_ink"]
+    width = analysis["width"]
+    height = analysis["height"]
     
-    header_end = int(height * 0.30)
-    text_blocks = _find_text_blocks(rows, int(height * 0.10), int(height * 0.36))
-    if text_blocks:
-        header_end = max(block[1] for block in text_blocks[:3])
+    header_end = _find_header_blocks(analysis)
     
-    name_area_top = max(header_end + 20, int(height * 0.44))
-    name_area_bottom = int(height * 0.58)
+    underline = _find_name_underline(row_ink, header_end, height)
     
-    underline_candidates = _find_horizontal_line_candidates(rows, name_area_top, name_area_bottom)
-    
-    if underline_candidates:
-        best_line = underline_candidates[0]
-        line_y = best_line["center"]
+    if underline:
+        line_y, score = underline
         
-        zone_top = name_area_top
-        zone_bottom = line_y - 4
+        zone_top = line_y - 38
+        zone_bottom = line_y - 3
         
-        if zone_bottom - zone_top >= 20:
-            return zone_top, zone_bottom
-        
-        if zone_bottom - zone_top < 15:
-            zone_bottom = zone_top + 35
+        if zone_top < header_end + 15:
+            zone_top = header_end + 15
         
         return zone_top, zone_bottom
+    
+    blank_rect = _find_blank_rectangle(center_ink, header_end, height)
+    
+    if blank_rect:
+        return blank_rect
     
     zone_top = int(height * 0.46)
     zone_bottom = int(height * 0.54)
